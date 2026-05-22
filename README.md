@@ -34,6 +34,18 @@ help with the setup:
 > Set up Symphony for my repository based on
 > https://github.com/openai/symphony/blob/main/elixir/README.md
 
+### Option 3. Use the C# implementation
+
+This repository also includes a .NET implementation under [csharp/](csharp/). It implements the core
+workflow/config, local markdown-file issue tracker, Linear tracker reader, workspace manager, Codex
+app-server runner, orchestrator, structured logs, and optional local HTTP status API from `SPEC.md`.
+
+```powershell
+cd csharp
+dotnet test .\Symphony.sln
+dotnet run --project .\src\Symphony.Cli\Symphony.Cli.csproj -- .\WORKFLOW.md
+```
+
 ---
 
 ## License

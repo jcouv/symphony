@@ -1,6 +1,6 @@
 # Symphony Service Specification
 
-Status: Draft v1 (language-agnostic)
+Status: Draft v2 (language-agnostic)
 
 Purpose: Define a service that orchestrates coding agents to get project work done.
 
@@ -16,8 +16,9 @@ behavior.
 ## 1. Problem Statement
 
 Symphony is a long-running automation service that continuously reads work from an issue tracker
-(Linear in this specification version), creates an isolated workspace for each issue, and runs a
-coding agent session for that issue inside the workspace.
+(a local Markdown-file tracker in the default profile, with Linear as an optional compatible
+adapter), creates an isolated workspace for each issue, and runs a coding agent session for that
+issue inside the workspace.
 
 The service solves four operational problems:
 
@@ -129,7 +130,7 @@ Symphony is easiest to port when kept in these layers:
 4. `Execution Layer` (workspace + agent subprocess)
    - Filesystem lifecycle, workspace preparation, coding-agent protocol.
 
-5. `Integration Layer` (Linear adapter)
+5. `Integration Layer` (local Markdown tracker, Linear adapter, or another tracker adapter)
    - API calls and normalization for tracker data.
 
 6. `Observability Layer` (logs + OPTIONAL status surface)
@@ -137,11 +138,11 @@ Symphony is easiest to port when kept in these layers:
 
 ### 3.3 External Dependencies
 
-- Issue tracker API (Linear for `tracker.kind: linear` in this specification version).
-- Local filesystem for workspaces and logs.
+- Local filesystem for issue files, workspaces, and logs.
+- OPTIONAL issue tracker API (Linear for `tracker.kind: linear`).
 - OPTIONAL workspace population tooling (for example Git CLI, if used).
 - Coding-agent executable that supports the targeted Codex app-server mode.
-- Host environment authentication for the issue tracker and coding agent.
+- Host environment authentication for the coding agent and for issue trackers that require auth.
 
 ## 4. Core Domain Model
 
@@ -349,19 +350,32 @@ Fields:
 
 - `kind` (string)
   - REQUIRED for dispatch.
-  - Current supported value: `linear`
+  - Core supported values:
+    - `local`
+    - `linear`
+- `root` (path string or `$VAR`)
+  - Used when `tracker.kind == "local"`.
+  - Default: `./issues` relative to the directory containing `WORKFLOW.md`.
+  - `~` is expanded.
+  - Relative paths are resolved relative to the directory containing `WORKFLOW.md`.
+  - The effective issues root is normalized to an absolute path before use.
 - `endpoint` (string)
+  - Used when `tracker.kind == "linear"`.
   - Default for `tracker.kind == "linear"`: `https://api.linear.app/graphql`
 - `api_key` (string)
+  - Used when `tracker.kind == "linear"`.
   - MAY be a literal token or `$VAR_NAME`.
   - Canonical environment variable for `tracker.kind == "linear"`: `LINEAR_API_KEY`.
   - If `$VAR_NAME` resolves to an empty string, treat the key as missing.
 - `project_slug` (string)
   - REQUIRED for dispatch when `tracker.kind == "linear"`.
 - `active_states` (list of strings)
-  - Default: `Todo`, `In Progress`
+  - Default for `tracker.kind == "local"`: `active`
+  - Default for `tracker.kind == "linear"`: `Todo`, `In Progress`
 - `terminal_states` (list of strings)
-  - Default: `Closed`, `Cancelled`, `Canceled`, `Duplicate`, `Done`
+  - Default for `tracker.kind == "local"`: `done`, `closed`, `cancelled`, `canceled`,
+    `duplicate`
+  - Default for `tracker.kind == "linear"`: `Closed`, `Cancelled`, `Canceled`, `Duplicate`, `Done`
 
 #### 5.3.2 `polling` (object)
 
@@ -475,7 +489,7 @@ Template input variables:
 Fallback prompt behavior:
 
 - If the workflow prompt body is empty, the runtime MAY use a minimal default prompt
-  (`You are working on an issue from Linear.`).
+  (`You are working on an issue.`).
 - Workflow file read/parse failures are configuration/validation errors and SHOULD NOT silently fall
   back to a prompt.
 
@@ -560,7 +574,7 @@ Validation checks:
 
 - Workflow file can be loaded and parsed.
 - `tracker.kind` is present and supported.
-- `tracker.api_key` is present after `$` resolution.
+- `tracker.api_key` is present after `$` resolution when REQUIRED by the selected tracker kind.
 - `tracker.project_slug` is present when REQUIRED by the selected tracker kind.
 - `codex.command` is present and non-empty.
 
@@ -570,12 +584,16 @@ This section is intentionally redundant so a coding agent can implement the conf
 Extension fields are documented in the extension section that defines them. Core conformance does
 not require recognizing or validating extension fields unless that extension is implemented.
 
-- `tracker.kind`: string, REQUIRED, currently `linear`
+- `tracker.kind`: string, REQUIRED, core supported values are `local` and `linear`
+- `tracker.root`: path resolved to absolute, default `./issues` when `tracker.kind=local`
 - `tracker.endpoint`: string, default `https://api.linear.app/graphql` when `tracker.kind=linear`
 - `tracker.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY` when `tracker.kind=linear`
 - `tracker.project_slug`: string, REQUIRED when `tracker.kind=linear`
-- `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
-- `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
+- `tracker.active_states`: list of strings, default `["active"]` when `tracker.kind=local`,
+  default `["Todo", "In Progress"]` when `tracker.kind=linear`
+- `tracker.terminal_states`: list of strings, default `["done", "closed", "cancelled",
+  "canceled", "duplicate"]` when `tracker.kind=local`, default `["Closed", "Cancelled",
+  "Canceled", "Duplicate", "Done"]` when `tracker.kind=linear`
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
 - `hooks.after_create`: shell script or null
@@ -1130,14 +1148,14 @@ Note:
 
 - Workspaces are intentionally preserved after successful runs.
 
-## 11. Issue Tracker Integration Contract (Linear-Compatible)
+## 11. Issue Tracker Integration Contract
 
 ### 11.1 REQUIRED Operations
 
 An implementation MUST support these tracker adapter operations:
 
 1. `fetch_candidate_issues()`
-   - Return issues in configured active states for a configured project.
+   - Return issues in configured active states for the configured tracker scope.
 
 2. `fetch_issues_by_states(state_names)`
    - Used for startup terminal cleanup.
@@ -1145,7 +1163,77 @@ An implementation MUST support these tracker adapter operations:
 3. `fetch_issue_states_by_ids(issue_ids)`
    - Used for active-run reconciliation.
 
-### 11.2 Query Semantics (Linear)
+### 11.2 Local Markdown Tracker Semantics
+
+Local tracker-specific requirements for `tracker.kind == "local"`:
+
+- `tracker.kind == "local"`
+- `tracker.root` points to an issues root directory.
+- The issues root contains one immediate subdirectory per tracker state.
+- Markdown files (`*.md`) under a state subdirectory are issue records in that state.
+- The file name without `.md` is the issue `id` and `identifier`.
+- Moving a Markdown issue file between state subdirectories changes its tracker state while preserving
+  identity.
+- Files directly under the issues root MAY be treated as an implementation-defined default state
+  (for example `inbox`), but they are not dispatch candidates unless that state is included in
+  `active_states`.
+- Candidate issue fetch scans Markdown files whose state subdirectory is in `active_states`.
+- Issue-state refresh by ID locates Markdown files by file name without `.md` across all state
+  subdirectories.
+- Terminal issue fetch scans Markdown files whose state subdirectory is in `terminal_states`.
+
+Recommended local tracker layout:
+
+```text
+issues/
+  active/
+    fix-issue-with-ui.md
+  review/
+    add-login-flow.md
+  done/
+    update-readme.md
+```
+
+Markdown issue file format:
+
+- YAML front matter is OPTIONAL.
+- The Markdown body is the issue description.
+- If front matter contains `title`, use it as the normalized issue title.
+- Otherwise, if the body contains a first-level Markdown heading (`# Title`), use that heading as the
+  title and omit it from the description if practical.
+- Otherwise, derive a title from the file name by replacing separators such as `-` and `_` with
+  spaces.
+
+Supported front matter fields:
+
+- `title` (string)
+- `priority` (integer)
+- `labels` (list of strings or string)
+- `blocked_by` (list of issue identifiers or string)
+- `branch_name` (string)
+- `url` (string)
+
+Local tracker normalization rules:
+
+- `id` and `identifier` are the file name without `.md`.
+- `state` is the immediate subdirectory name under `tracker.root`.
+- `labels` are normalized to lowercase.
+- `blocked_by` entries produce blocker refs with `identifier` set and `id`/`state` nullable unless
+  the implementation resolves blocker issue files.
+- `created_at` and `updated_at` SHOULD be derived from filesystem metadata when available.
+- `url` MAY be a `file://` URL when front matter does not provide one.
+- Missing or malformed issue files SHOULD be logged and skipped rather than crashing the orchestrator
+  tick.
+
+Local tracker write boundary:
+
+- Symphony's orchestrator still does not require first-class write APIs.
+- Workflow prompts and agent tools MAY edit issue Markdown content or move issue files between state
+  folders as the mechanism for comments, metadata updates, and state transitions.
+- Implementations SHOULD document whether the coding agent is expected to move files itself or whether
+  separate repo tools/skills perform the move.
+
+### 11.3 Query Semantics (Linear)
 
 Linear-specific requirements for `tracker.kind == "linear"`:
 
@@ -1167,24 +1255,29 @@ Important:
 A non-Linear implementation MAY change transport details, but the normalized outputs MUST match the
 domain model in Section 4.
 
-### 11.3 Normalization Rules
+### 11.4 Shared Normalization Rules
 
 Candidate issue normalization SHOULD produce fields listed in Section 4.1.1.
 
 Additional normalization details:
 
 - `labels` -> lowercase strings
-- `blocked_by` -> derived from inverse relations where relation type is `blocks`
+- For Linear, `blocked_by` -> derived from inverse relations where relation type is `blocks`
+- For local Markdown, `blocked_by` -> derived from issue front matter
 - `priority` -> integer only (non-integers become null)
 - `created_at` and `updated_at` -> parse ISO-8601 timestamps
+  - For local Markdown, filesystem timestamps are conforming when front matter timestamps are absent.
 
-### 11.4 Error Handling Contract
+### 11.5 Error Handling Contract
 
 RECOMMENDED error categories:
 
 - `unsupported_tracker_kind`
 - `missing_tracker_api_key`
 - `missing_tracker_project_slug`
+- `local_issue_root_missing`
+- `local_issue_read`
+- `local_issue_parse`
 - `linear_api_request` (transport failures)
 - `linear_api_status` (non-200 HTTP)
 - `linear_graphql_errors`
@@ -1197,7 +1290,7 @@ Orchestrator behavior on tracker errors:
 - Running-state refresh failure: log and keep active workers running.
 - Startup terminal cleanup failure: log warning and continue startup.
 
-### 11.5 Tracker Writes (Important Boundary)
+### 11.6 Tracker Writes (Important Boundary)
 
 Symphony does not require first-class tracker write APIs in the orchestrator.
 
@@ -1205,7 +1298,9 @@ Symphony does not require first-class tracker write APIs in the orchestrator.
   agent using tools defined by the workflow prompt.
 - The service remains a scheduler/runner and tracker reader.
 - Workflow-specific success often means "reached the next handoff state" (for example
-  `Human Review`) rather than tracker terminal state `Done`.
+  `review` or `Human Review`) rather than tracker terminal state `done`/`Done`.
+- For the local Markdown tracker, moving a file from `issues/active/` to another state folder is the
+  usual state-transition mechanism.
 - If the `linear_graphql` client-side tool extension is implemented, it is still part of the agent
   toolchain rather than orchestrator business logic.
 
@@ -1521,7 +1616,7 @@ API design notes:
 1. `Workflow/Config Failures`
    - Missing `WORKFLOW.md`
    - Invalid YAML front matter
-   - Unsupported tracker kind or missing tracker credentials/project slug
+   - Unsupported tracker kind, missing tracker credentials/project slug, or invalid local issue root
    - Missing coding-agent executable
 
 2. `Workspace Failures`
@@ -1663,8 +1758,8 @@ Possible hardening measures include:
   of running with a maximally permissive configuration.
 - Adding external isolation layers such as OS/container/VM sandboxing, network restrictions, or
   separate credentials beyond the built-in Codex policy controls.
-- Filtering which Linear issues, projects, teams, labels, or other tracker sources are eligible for
-  dispatch so untrusted or out-of-scope tasks do not automatically reach the agent.
+- Filtering which local issue folders, Linear issues/projects/teams/labels, or other tracker sources
+  are eligible for dispatch so untrusted or out-of-scope tasks do not automatically reach the agent.
 - Narrowing the `linear_graphql` tool so it can only read or mutate data inside the
   intended project scope, rather than exposing general workspace-wide tracker access.
 - Reducing the set of client-side tools, credentials, filesystem paths, and network destinations
@@ -1940,8 +2035,9 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Invalid YAML front matter returns typed error
 - Front matter non-map returns typed error
 - Config defaults apply when OPTIONAL values are missing
-- `tracker.kind` validation enforces currently supported kind (`linear`)
-- `tracker.api_key` works (including `$VAR` indirection)
+- `tracker.kind` validation enforces currently supported kinds (`local`, `linear`)
+- `tracker.api_key` works for Linear (including `$VAR` indirection)
+- `tracker.root` works for local Markdown issues (including `$VAR` indirection)
 - `$VAR` resolution works for tracker API key and path values
 - `~` path expansion works
 - `codex.command` is preserved as a shell command string
@@ -1966,14 +2062,19 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 ### 17.3 Issue Tracker Client
 
-- Candidate issue fetch uses active states and project slug
-- Linear query uses the specified project filter field (`slugId`)
+- Candidate issue fetch uses active states and the selected tracker scope
+- Local Markdown tracker maps state to immediate subfolders under `tracker.root`
+- Local Markdown tracker maps Markdown file names to issue IDs/identifiers
+- Local Markdown tracker reads optional YAML front matter and Markdown body
+- Local Markdown tracker observes state changes when files move between state folders
+- If Linear is implemented, Linear query uses the specified project filter field (`slugId`)
 - Empty `fetch_issues_by_states([])` returns empty without API call
-- Pagination preserves order across multiple pages
-- Blockers are normalized from inverse relations of type `blocks`
+- If Linear is implemented, pagination preserves order across multiple pages
+- Blockers are normalized from tracker-specific sources
 - Labels are normalized to lowercase
 - Issue state refresh by ID returns minimal normalized issues
-- Issue state refresh query uses GraphQL ID typing (`[ID!]`) as specified in Section 11.2
+- If Linear is implemented, issue state refresh query uses GraphQL ID typing (`[ID!]`) as specified
+  in Section 11.3
 - Error mapping for request errors, non-200, GraphQL errors, malformed payloads
 
 ### 17.4 Orchestrator Dispatch, Reconciliation, and Retry
@@ -2049,8 +2150,9 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 These checks are RECOMMENDED for production readiness and MAY be skipped in CI when credentials,
 network access, or external service permissions are unavailable.
 
-- A real tracker smoke test can be run with valid credentials supplied by `LINEAR_API_KEY` or a
-  documented local bootstrap mechanism (for example `~/.linear_api_key`).
+- A real local-tracker smoke test can be run with an isolated temporary `issues/` tree.
+- If Linear is implemented, a real Linear smoke test can be run with valid credentials supplied by
+  `LINEAR_API_KEY` or a documented local bootstrap mechanism (for example `~/.linear_api_key`).
 - Real integration tests SHOULD use isolated test identifiers/workspaces and clean up tracker
   artifacts when practical.
 - A skipped real-integration test SHOULD be reported as skipped, not silently treated as passed.
@@ -2072,7 +2174,8 @@ Use the same validation profiles as Section 17:
 - Typed config layer with defaults and `$` resolution
 - Dynamic `WORKFLOW.md` watch/reload/re-apply for config and prompt
 - Polling orchestrator with single-authority mutable state
-- Issue tracker client with candidate fetch + state refresh + terminal fetch
+- Local Markdown issue tracker with candidate fetch + state refresh + terminal fetch
+- Tracker adapter abstraction with candidate fetch + state refresh + terminal fetch
 - Workspace manager with sanitized per-issue workspaces
 - Workspace lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`)
 - Hook timeout config (`hooks.timeout_ms`, default `60000`)
@@ -2097,7 +2200,7 @@ Use the same validation profiles as Section 17:
   implementation details.
 - TODO: Add first-class tracker write APIs (comments/state transitions) in the orchestrator instead
   of only via agent tools.
-- TODO: Add pluggable issue tracker adapters beyond Linear.
+- TODO: Add more pluggable issue tracker adapters beyond local Markdown and Linear.
 
 ### 18.3 Operational Validation Before Production (RECOMMENDED)
 
