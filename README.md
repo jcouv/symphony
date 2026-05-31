@@ -5,7 +5,7 @@ work instead of supervising coding agents.
 
 [![Symphony demo video preview](.github/media/symphony-demo-poster.jpg)](https://player.vimeo.com/video/1186371009?h=5626e4b899)
 
-_In this [demo video](https://player.vimeo.com/video/1186371009?h=5626e4b899), Symphony monitors a Linear board for work and spawns agents to handle the tasks. The agents complete the tasks and provide proof of work: CI status, PR review feedback, complexity analysis, and walkthrough videos. When accepted, the agents land the PR safely. Engineers do not need to supervise Codex; they can manage the work at a higher level._
+_Symphony monitors local Markdown issue files for work and spawns Copilot CLI agents to handle the tasks. Engineers manage the work at the issue-tracking level instead of supervising each coding-agent turn._
 
 > [!WARNING]
 > Symphony is a low-key engineering preview for testing in trusted environments.
@@ -36,15 +36,37 @@ help with the setup:
 
 ### Option 3. Use the C# implementation
 
-This repository also includes a .NET implementation under [csharp/](csharp/). It implements the core
-workflow/config, local markdown-file issue tracker, Linear tracker reader, workspace manager, Codex
-app-server runner, orchestrator, structured logs, and optional local HTTP status API from `SPEC.md`.
+This repository includes a .NET implementation at the repository root. It implements the core
+workflow/config, local Markdown-file issue tracker, workspace manager, Copilot CLI runner,
+orchestrator, structured logs, and optional local HTTP status API from `SPEC.md`.
 
 ```powershell
-cd csharp
 dotnet test .\Symphony.sln
 dotnet run --project .\src\Symphony.Cli\Symphony.Cli.csproj -- .\WORKFLOW.md
 ```
+
+The included `WORKFLOW.md` uses local markdown issues by default. Create active issue files under
+`issues\active\`, for example:
+
+```powershell
+New-Item -ItemType Directory -Force .\issues\active | Out-Null
+@'
+# Fix issue with UI
+
+The button is misaligned.
+'@ | Set-Content .\issues\active\fix-issue-with-ui.md
+```
+
+Moving an issue file between immediate subfolders changes its state, so moving
+`issues\active\fix-issue-with-ui.md` to `issues\done\fix-issue-with-ui.md` marks it done. Add
+`--port <port>` to enable the local dashboard and JSON API:
+
+```powershell
+dotnet run --project .\src\Symphony.Cli\Symphony.Cli.csproj -- .\WORKFLOW.md --port 4545
+```
+
+Runtime prerequisites for real work dispatch are an authenticated `copilot` executable on `PATH` and
+any tools referenced by your `WORKFLOW.md` hooks.
 
 ---
 
